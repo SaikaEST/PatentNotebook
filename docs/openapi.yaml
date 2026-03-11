@@ -1,0 +1,98 @@
+openapi: 3.1.0
+info:
+  title: Patent Prosecution Notebook API
+  version: 0.2.0
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200": { description: OK }
+  /auth/login:
+    post:
+      summary: Login (local dev)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        "200": { description: Token }
+  /cases:
+    post:
+      summary: Create/import case
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                jurisdiction: { type: string, enum: [CN, EU, US] }
+                application_no: { type: string }
+                publication_no: { type: string }
+                family_strategy: { type: string }
+      responses:
+        "200": { description: Case created }
+    get:
+      summary: List cases
+      responses:
+        "200": { description: List cases }
+  /cases/{id}/ingest:
+    post:
+      summary: Start ingestion (async)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                providers:
+                  type: array
+                  items: { type: string, enum: [cnipr, epo, uspto, dms] }
+                prefer_official: { type: boolean, default: true }
+                include_dms_fallback: { type: boolean, default: true }
+                trigger_processing: { type: boolean, default: true }
+      responses:
+        "200": { description: Queued with task id and missing hints }
+  /sources/upload:
+    post:
+      summary: Upload source document
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                jurisdiction_case_id: { type: string }
+                doc_type: { type: string }
+                file: { type: string, format: binary }
+      responses:
+        "200": { description: Source created }
+  /chat:
+    post:
+      summary: Chat with selected sources
+      responses:
+        "200": { description: Answer with citations }
+  /studio/artifacts:
+    post:
+      summary: Generate artifacts (async)
+      responses:
+        "200": { description: Queued }
+  /exports:
+    post:
+      summary: Export report
+      responses:
+        "200": { description: Queued }
+  /alerts:
+    post:
+      summary: Subscribe alerts
+      responses:
+        "200": { description: Subscribed }

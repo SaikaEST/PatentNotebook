@@ -1,0 +1,36 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+
+# Env
+.env
+.env.*
+
+# Logs
+*.log
+
+# Data / runtime files
+data/
+data_live_test/
+local_exports/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar
+*.gz
+backups/
