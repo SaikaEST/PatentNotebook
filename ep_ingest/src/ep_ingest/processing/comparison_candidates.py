@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -10,12 +10,13 @@ from ep_ingest.models import DocumentRecord
 
 
 CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("communication_from_examining_division", ("communication from the examining division",)),
+    ("annex_to_the_communication", ("annex to the communication",)),
+    ("reply_to_communication_from_examining_division", ("reply to communication from the examining division",)),
+    ("amended_claims", ("amended claims",)),
     ("amended_claims_with_annotations", ("amended claims with annotations",)),
-    ("amended_description_with_annotations", ("amended description with annotations",)),
-    ("text_intended_for_grant_clean_copy", ("text intended for grant clean copy",)),
     ("european_search_opinion", ("european search opinion",)),
     ("claims", ("claims",)),
-    ("description", ("description",)),
 ]
 
 CLAIMS_TRANSLATION_HINTS = (
@@ -25,15 +26,11 @@ CLAIMS_TRANSLATION_HINTS = (
     "filing of the translations of the claims",
     "claims translation",
     "translated claims",
-)
-
-DESCRIPTION_TRANSLATION_HINTS = (
-    "translation of description",
-    "translation of the description",
-    "translations of the description",
-    "filing of the translations of the description",
-    "description translation",
-    "translated description",
+    "translation of amended claims",
+    "translation of the amended claims",
+    "translations of the amended claims",
+    "amended claims translation",
+    "translated amended claims",
 )
 
 
@@ -42,7 +39,7 @@ def export_comparison_candidates(
     files_dir: Path,
 ) -> dict[str, Any]:
     comparison_dir = files_dir / "comparison_candidates"
-    comparison_dir.mkdir(parents=True, exist_ok=True)
+    _reset_comparison_dir(comparison_dir)
 
     selected: list[dict[str, str]] = []
     seen_sources: set[Path] = set()
@@ -86,6 +83,12 @@ def export_comparison_candidates(
     return payload
 
 
+def _reset_comparison_dir(comparison_dir: Path) -> None:
+    if comparison_dir.exists():
+        shutil.rmtree(comparison_dir)
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+
+
 def _resolve_source_path(local_path: str, files_dir: Path) -> Path | None:
     raw = local_path.strip()
     if raw:
@@ -107,19 +110,20 @@ def _resolve_source_path(local_path: str, files_dir: Path) -> Path | None:
 
 def _match_category(*, document_type_raw: str, file_name: str) -> str | None:
     text = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", f"{document_type_raw} {file_name}".lower())).strip()
+
+    if "reply to communication from the examining division" in text:
+        return "reply_to_communication_from_examining_division"
+    if "amended claims with annotations" in text:
+        return "amended_claims_with_annotations"
+
     for category, keywords in CATEGORY_RULES:
         if category == "claims":
             if not re.search(r"\bclaims\b", text):
                 continue
-        elif category == "description":
-            if not re.search(r"\bdescription\b", text):
-                continue
         elif not any(keyword in text for keyword in keywords):
             continue
 
-        if category == "claims" and any(hint in text for hint in CLAIMS_TRANSLATION_HINTS):
-            continue
-        if category == "description" and any(hint in text for hint in DESCRIPTION_TRANSLATION_HINTS):
+        if "claims" in category and any(hint in text for hint in CLAIMS_TRANSLATION_HINTS):
             continue
         return category
     return None
@@ -138,3 +142,10 @@ def _unique_target_path(target_dir: Path, file_name: str) -> Path:
         if not candidate.exists():
             return candidate
         index += 1
+
+
+
+
+
+
+

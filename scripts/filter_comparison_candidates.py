@@ -109,7 +109,7 @@ def process_documents_json(documents_json: Path, out_root: Path) -> int:
 
     files_dir = documents_json.parent / "files"
     comparison_dir = files_dir / "comparison_candidates"
-    comparison_dir.mkdir(parents=True, exist_ok=True)
+    reset_comparison_dir(comparison_dir)
 
     selected: list[dict[str, str]] = []
     seen: set[Path] = set()
@@ -155,6 +155,12 @@ def process_documents_json(documents_json: Path, out_root: Path) -> int:
         encoding="utf-8",
     )
     return len(selected)
+
+
+def reset_comparison_dir(comparison_dir: Path) -> None:
+    if comparison_dir.exists():
+        shutil.rmtree(comparison_dir)
+    comparison_dir.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:

@@ -1,10 +1,10 @@
-"use client";
+﻿"use client";
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { login, register } from "../lib/api";
-import { TOKEN_STORAGE_KEY } from "../lib/workspace";
+import { RESETTABLE_WORKSPACE_KEYS, TOKEN_STORAGE_KEY } from "../lib/workspace";
 
 type AuthMode = "login" | "register";
 
@@ -29,6 +29,13 @@ export default function Home() {
   const [successMessage, setSuccessMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const clearWorkspaceState = () => {
+    RESETTABLE_WORKSPACE_KEYS.forEach((key) => {
+      localStorage.removeItem(key);
+      sessionStorage.removeItem(key);
+    });
+  };
+
   const handleAuth = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!email.trim()) {
@@ -40,7 +47,7 @@ export default function Home() {
       return;
     }
     if (mode === "register" && password !== confirmPassword) {
-      setErrorMessage("两次密码输入不一致。");
+      setErrorMessage("两次输入的密码不一致。");
       return;
     }
 
@@ -52,6 +59,7 @@ export default function Home() {
         mode === "register"
           ? await register(email.trim(), password)
           : await login(email.trim(), password);
+      clearWorkspaceState();
       localStorage.setItem(TOKEN_STORAGE_KEY, result.access_token);
       setPassword("");
       setConfirmPassword("");

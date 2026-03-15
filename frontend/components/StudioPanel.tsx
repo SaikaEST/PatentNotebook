@@ -14,6 +14,7 @@ import {
   CASE_STORAGE_KEY,
   INCLUDED_SOURCE_IDS_STORAGE_KEY,
   JURISDICTION_CASE_STORAGE_KEY,
+  STUDIO_FORM_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
 } from "../lib/workspace";
 
@@ -68,12 +69,14 @@ export default function StudioPanel() {
   const [openingId, setOpeningId] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
+  const [hasRestored, setHasRestored] = useState(false);
 
   useEffect(() => {
     const savedToken = localStorage.getItem(TOKEN_STORAGE_KEY) || "";
     const savedCaseId = localStorage.getItem(CASE_STORAGE_KEY) || "";
     const savedSourceIds = localStorage.getItem(INCLUDED_SOURCE_IDS_STORAGE_KEY) || "[]";
     const savedArtifacts = localStorage.getItem(ARTIFACT_TASKS_STORAGE_KEY) || "[]";
+    const savedStudioForm = localStorage.getItem(STUDIO_FORM_STORAGE_KEY) || "";
 
     setToken(savedToken);
     setCaseId(savedCaseId);
@@ -87,7 +90,29 @@ export default function StudioPanel() {
     } catch {
       parsedIds = [];
     }
-    setSourceIdsInput(parsedIds.join(", "));
+
+    let restoredSourceIdsInput = parsedIds.join(", ");
+    let restoredArtifactType = "quick_outline";
+    let restoredParamsInput = "";
+    try {
+      const savedForm = JSON.parse(savedStudioForm);
+      if (savedForm && typeof savedForm === "object") {
+        if (typeof savedForm.sourceIdsInput === "string") {
+          restoredSourceIdsInput = savedForm.sourceIdsInput;
+        }
+        if (typeof savedForm.artifactType === "string" && savedForm.artifactType.trim()) {
+          restoredArtifactType = savedForm.artifactType;
+        }
+        if (typeof savedForm.paramsInput === "string") {
+          restoredParamsInput = savedForm.paramsInput;
+        }
+      }
+    } catch {
+    }
+
+    setSourceIdsInput(restoredSourceIdsInput);
+    setArtifactType(restoredArtifactType);
+    setParamsInput(restoredParamsInput);
 
     try {
       const tasks = JSON.parse(savedArtifacts);
@@ -105,13 +130,15 @@ export default function StudioPanel() {
           const validIds = new Set(sources.map((item) => item.id));
           const sanitizedIds = parsedIds.filter((id) => validIds.has(id));
           if (!active || sanitizedIds.length === parsedIds.length) return;
-          setSourceIdsInput(sanitizedIds.join(", "));
+          const nextSourceIdsInput = sanitizedIds.join(", ");
+          setSourceIdsInput((current) => (current === parsedIds.join(", ") ? nextSourceIdsInput : current));
           localStorage.setItem(INCLUDED_SOURCE_IDS_STORAGE_KEY, JSON.stringify(sanitizedIds));
         } catch {
-          // Keep local value if network/auth is unavailable.
         }
       })();
     }
+
+    setHasRestored(true);
 
     return () => {
       active = false;
@@ -119,12 +146,27 @@ export default function StudioPanel() {
   }, []);
 
   useEffect(() => {
+    if (!hasRestored) return;
     localStorage.setItem(CASE_STORAGE_KEY, caseId);
-  }, [caseId]);
+  }, [caseId, hasRestored]);
 
   useEffect(() => {
+    if (!hasRestored) return;
     localStorage.setItem(ARTIFACT_TASKS_STORAGE_KEY, JSON.stringify(artifacts));
-  }, [artifacts]);
+  }, [artifacts, hasRestored]);
+
+
+  useEffect(() => {
+    if (!hasRestored) return;
+    localStorage.setItem(
+      STUDIO_FORM_STORAGE_KEY,
+      JSON.stringify({
+        sourceIdsInput,
+        artifactType,
+        paramsInput,
+      })
+    );
+  }, [artifactType, hasRestored, paramsInput, sourceIdsInput]);
 
   const parsedSourceIds = useMemo(() => parseSourceIds(sourceIdsInput), [sourceIdsInput]);
 
@@ -133,7 +175,7 @@ export default function StudioPanel() {
     try {
       const ids = JSON.parse(savedSourceIds);
       if (!Array.isArray(ids)) {
-        setErrorMessage("本地存储中的来源编号无效。");
+        setErrorMessage("本地存储中的来源文档 ID 无效。");
         return;
       }
 
@@ -147,15 +189,14 @@ export default function StudioPanel() {
           nextIds = parsedIds.filter((id) => validIds.has(id));
           localStorage.setItem(INCLUDED_SOURCE_IDS_STORAGE_KEY, JSON.stringify(nextIds));
         } catch {
-          // Ignore sync failure and keep local IDs.
         }
       }
 
       setSourceIdsInput(nextIds.join(", "));
       setErrorMessage("");
-      setSuccessMessage(`已从本地加载 ${nextIds.length} 个来源编号。`);
+      setSuccessMessage(`已从本地加载 ${nextIds.length} 个来源文档 ID。`);
     } catch {
-      setErrorMessage("读取本地来源编号失败。");
+      setErrorMessage("读取本地来源文档 ID 失败。");
     }
   };
 
@@ -165,7 +206,7 @@ export default function StudioPanel() {
       return;
     }
     if (!caseId.trim()) {
-      setErrorMessage("请输入案件编号。");
+      setErrorMessage("请输入案件 ID。");
       return;
     }
 
@@ -297,7 +338,7 @@ export default function StudioPanel() {
       <h2>报告工坊</h2>
       <div className="source-controls">
         <label className="field-group">
-          <span>案件编号</span>
+          <span>案件 ID</span>
           <input
             value={caseId}
             onChange={(event) => setCaseId(event.target.value)}
@@ -305,11 +346,11 @@ export default function StudioPanel() {
           />
         </label>
         <label className="field-group">
-          <span>来源编号列表</span>
+          <span>来源文档 ID 列表</span>
           <input
             value={sourceIdsInput}
             onChange={(event) => setSourceIdsInput(event.target.value)}
-            placeholder="多个来源编号，用逗号分隔"
+            placeholder="多个来源文档 ID，用逗号分隔"
           />
         </label>
         <label className="field-group">
@@ -333,7 +374,7 @@ export default function StudioPanel() {
         </label>
         <div className="inline-actions">
           <button type="button" onClick={() => void syncSourceIdsFromLocal()}>
-            使用本地已勾选来源
+            使用本地已勾选文档
           </button>
           <button type="button" onClick={() => void generateArtifact()} disabled={isGenerating}>
             {isGenerating ? "生成中..." : "生成"}

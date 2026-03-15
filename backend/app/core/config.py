@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     ep_register_only: bool = False
 
     # OCR fallback for image/scanned PDFs.
+    deepseek_api_base: str = "https://api.deepseek.com"
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-chat"
+    deepseek_timeout_sec: int = 60
+    deepseek_max_context_chars: int = 12000
+
     enable_pdf_ocr: bool = True
     pdf_ocr_min_chars: int = 80
     pdf_ocr_page_min_chars: int = 20

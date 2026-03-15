@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -6,21 +6,9 @@ import { useRouter } from "next/navigation";
 import ChatPanel from "../../components/ChatPanel";
 import SourcesPanel from "../../components/SourcesPanel";
 import StudioPanel from "../../components/StudioPanel";
-import {
-  ARTIFACT_TASKS_STORAGE_KEY,
-  CASE_STORAGE_KEY,
-  INCLUDED_SOURCE_IDS_STORAGE_KEY,
-  JURISDICTION_CASE_STORAGE_KEY,
-  TOKEN_STORAGE_KEY,
-} from "../../lib/workspace";
+import { RESETTABLE_WORKSPACE_KEYS, TOKEN_STORAGE_KEY } from "../../lib/workspace";
 
-const WORKSPACE_KEYS = [
-  TOKEN_STORAGE_KEY,
-  CASE_STORAGE_KEY,
-  JURISDICTION_CASE_STORAGE_KEY,
-  INCLUDED_SOURCE_IDS_STORAGE_KEY,
-  ARTIFACT_TASKS_STORAGE_KEY,
-];
+const WORKSPACE_KEYS = [TOKEN_STORAGE_KEY, ...RESETTABLE_WORKSPACE_KEYS];
 
 export default function AssistantPage() {
   const router = useRouter();
@@ -36,7 +24,10 @@ export default function AssistantPage() {
   }, [router]);
 
   const handleLogout = () => {
-    WORKSPACE_KEYS.forEach((key) => localStorage.removeItem(key));
+    WORKSPACE_KEYS.forEach((key) => {
+      localStorage.removeItem(key);
+      sessionStorage.removeItem(key);
+    });
     router.replace("/");
   };
 

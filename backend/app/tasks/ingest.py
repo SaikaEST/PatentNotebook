@@ -1,4 +1,4 @@
-import json
+﻿import json
 import shutil
 import uuid
 from io import BytesIO
@@ -17,7 +17,7 @@ from app.models.entities import (
     SourceDocument,
 )
 from app.pipelines.adapters.registry import ADAPTERS, resolve_provider_order
-from app.services.document_classifier import infer_doc_type
+from app.services.document_classifier import classify_doc_type, infer_doc_type, should_auto_include
 from app.services.document_parser import chunk_pages, parse_document_bytes
 from app.services.storage import storage_client
 from app.services.vectorizer import embed_text
@@ -34,16 +34,24 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 
 _COMPARISON_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
     (
+        "communication_from_examining_division",
+        ("communication from the examining division",),
+    ),
+    (
+        "annex_to_the_communication",
+        ("annex to the communication",),
+    ),
+    (
+        "reply_to_communication_from_examining_division",
+        ("reply to communication from the examining division",),
+    ),
+    (
+        "amended_claims",
+        ("amended claims",),
+    ),
+    (
         "amended_claims_with_annotations",
         ("amended claims with annotations",),
-    ),
-    (
-        "amended_description_with_annotations",
-        ("amended description with annotations",),
-    ),
-    (
-        "text_intended_for_grant_clean_copy",
-        ("text intended for grant clean copy",),
     ),
     (
         "european_search_opinion",
@@ -53,10 +61,6 @@ _COMPARISON_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
         "claims",
         ("claims",),
     ),
-    (
-        "description",
-        ("description",),
-    ),
 ]
 _CLAIMS_TRANSLATION_HINTS = (
     "translation of claims",
@@ -65,16 +69,12 @@ _CLAIMS_TRANSLATION_HINTS = (
     "filing of the translations of the claims",
     "claims translation",
     "translated claims",
+    "translation of amended claims",
+    "translation of the amended claims",
+    "translations of the amended claims",
+    "amended claims translation",
+    "translated amended claims",
 )
-_DESCRIPTION_TRANSLATION_HINTS = (
-    "translation of description",
-    "translation of the description",
-    "translations of the description",
-    "filing of the translations of the description",
-    "description translation",
-    "translated description",
-)
-
 
 def _load_source_bytes(source: SourceDocument) -> tuple[bytes, dict[str, Any]]:
     metadata = source.meta_json or {}
@@ -152,29 +152,82 @@ def _build_metadata_fallback_text(source: SourceDocument) -> str:
     return "\n".join(parts)
 
 
-def _process_source(db: Session, source: SourceDocument):
+def _resolve_local_text_output_path(source: SourceDocument, payload_meta: dict[str, Any]) -> Path | None:
+    source_meta = source.meta_json or {}
+    file_name = str(source_meta.get("file_name") or payload_meta.get("file_name") or "").strip()
+    safe_text_name = Path(file_name).with_suffix(".txt").name if file_name else f"{source.id}.txt"
+    current_local_text_path = str(source_meta.get("local_text_path") or "").strip()
+
+    candidates = [
+        str(payload_meta.get("local_path") or "").strip(),
+        str(source_meta.get("local_path") or "").strip(),
+    ]
+    for raw in candidates:
+        if not raw:
+            continue
+        source_path = Path(raw)
+        parents = [source_path.parent, *source_path.parents]
+        for parent in parents:
+            if parent.name.lower() == "files":
+                text_dir = parent.parent / "text"
+                text_dir.mkdir(parents=True, exist_ok=True)
+                candidate = text_dir / safe_text_name
+                if candidate.exists() and current_local_text_path and Path(current_local_text_path) != candidate:
+                    candidate = text_dir / f"{Path(safe_text_name).stem}_{source.id}.txt"
+                return candidate
+        text_dir = source_path.parent / "text"
+        text_dir.mkdir(parents=True, exist_ok=True)
+        candidate = text_dir / safe_text_name
+        if candidate.exists() and current_local_text_path and Path(current_local_text_path) != candidate:
+            candidate = text_dir / f"{Path(safe_text_name).stem}_{source.id}.txt"
+        return candidate
+
+    root = Path(settings.ep_ingest_out_dir or "/data")
+    text_dir = root / "parsed_local"
+    text_dir.mkdir(parents=True, exist_ok=True)
+    candidate = text_dir / safe_text_name
+    if candidate.exists() and current_local_text_path and Path(current_local_text_path) != candidate:
+        candidate = text_dir / f"{Path(safe_text_name).stem}_{source.id}.txt"
+    return candidate
+
+
+
+def _write_local_text_copy(source: SourceDocument, payload_meta: dict[str, Any], text: str) -> str | None:
+    output_path = _resolve_local_text_output_path(source, payload_meta)
+    if output_path is None:
+        return None
     try:
-        data, payload_meta = _load_source_bytes(source)
-    except Exception as exc:
-        return {"status": "error", "reason": str(exc)}
+        output_path.write_text(text, encoding="utf-8")
+    except Exception:
+        return None
+    return str(output_path)
 
-    parse_name = (
-        payload_meta.get("object_name")
-        or payload_meta.get("local_path")
-        or (source.meta_json or {}).get("file_name")
-        or source.file_uri
-    )
-    parsed = parse_document_bytes(data, filename=str(parse_name or ""))
-    pages = parsed.get("pages", [])
-    parse_meta = parsed.get("meta") or {}
-    extraction_mode = parse_meta.get("text_extraction")
 
+def _persist_parsed_source(
+    db: Session,
+    source: SourceDocument,
+    pages: list[dict[str, Any]],
+    payload_meta: dict[str, Any],
+    *,
+    extraction_mode: str | None,
+    fallback_extraction: str,
+    extra_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     chunks = list(chunk_pages(pages))
+    db.query(DocumentChunk).filter(DocumentChunk.source_id == source.id).delete()
+
+    updated_meta = {**(source.meta_json or {}), **payload_meta, "pages": len(pages)}
+    if extra_meta:
+        for key, value in extra_meta.items():
+            if value is None:
+                updated_meta.pop(key, None)
+            else:
+                updated_meta[key] = value
+
     if not chunks:
-        # For image-only PDFs, keep a metadata-only chunk so retrieval can still locate the file.
+        # Keep a metadata-only placeholder until OCR or manual review enriches the source.
         fallback_text = _build_metadata_fallback_text(source)
         embedding = embed_text(fallback_text, settings.vector_dim)
-        db.query(DocumentChunk).filter(DocumentChunk.source_id == source.id).delete()
         db.add(
             DocumentChunk(
                 source_id=source.id,
@@ -186,17 +239,17 @@ def _process_source(db: Session, source: SourceDocument):
                 embedding=embedding,
             )
         )
-        source.meta_json = {
-            **(source.meta_json or {}),
-            **payload_meta,
-            "pages": len(pages),
-            "chunks": 1,
-            "text_extraction": "metadata_fallback_no_ocr",
-        }
+        updated_meta["chunks"] = 1
+        updated_meta["text_extraction"] = fallback_extraction
+        source.text_uri = None
+        local_text_path = _write_local_text_copy(source, payload_meta, fallback_text)
+        if local_text_path:
+            updated_meta["local_text_path"] = local_text_path
+        else:
+            updated_meta.pop("local_text_path", None)
+        source.meta_json = updated_meta
         db.commit()
         return {"status": "ok", "chunks": 1, "fallback": "metadata_only"}
-
-    db.query(DocumentChunk).filter(DocumentChunk.source_id == source.id).delete()
 
     for idx, chunk in enumerate(chunks):
         text = chunk.get("text", "")
@@ -219,7 +272,12 @@ def _process_source(db: Session, source: SourceDocument):
     text_object = f"parsed/{source.id}.txt"
     storage_client.put_text(text_object, full_text)
     source.text_uri = storage_client.object_uri(text_object)
-    updated_meta = {**(source.meta_json or {}), **payload_meta, "pages": len(pages), "chunks": len(chunks)}
+    local_text_path = _write_local_text_copy(source, payload_meta, full_text)
+    if local_text_path:
+        updated_meta["local_text_path"] = local_text_path
+    else:
+        updated_meta.pop("local_text_path", None)
+    updated_meta["chunks"] = len(chunks)
     if extraction_mode:
         updated_meta["text_extraction"] = extraction_mode
     else:
@@ -229,6 +287,106 @@ def _process_source(db: Session, source: SourceDocument):
     db.commit()
     return {"status": "ok", "chunks": len(chunks)}
 
+
+def _queue_ocr_task(db: Session, source: SourceDocument) -> str:
+    task = ocr_source.delay(str(source.id))
+    meta = {**(source.meta_json or {})}
+    meta["ocr_status"] = "queued"
+    meta["ocr_task_id"] = task.id
+    source.meta_json = meta
+    db.commit()
+    return task.id
+
+
+
+def _process_source(db: Session, source: SourceDocument):
+    try:
+        data, payload_meta = _load_source_bytes(source)
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)}
+
+    parse_name = (
+        payload_meta.get("object_name")
+        or payload_meta.get("local_path")
+        or (source.meta_json or {}).get("file_name")
+        or source.file_uri
+    )
+    parsed = parse_document_bytes(data, filename=str(parse_name or ""), allow_ocr=False)
+    pages = parsed.get("pages", [])
+    parse_meta = parsed.get("meta") or {}
+    extraction_mode = parse_meta.get("text_extraction")
+
+    current_meta = source.meta_json or {}
+    already_ocr_done = str(current_meta.get("ocr_status") or "").lower() == "done"
+    if str(current_meta.get("text_extraction") or "").lower() in {"pdf_ocr", "pdf_text_plus_ocr"}:
+        already_ocr_done = True
+    ocr_recommended = bool(parse_meta.get("ocr_recommended")) and not already_ocr_done
+    result = _persist_parsed_source(
+        db,
+        source,
+        pages,
+        payload_meta,
+        extraction_mode=extraction_mode,
+        fallback_extraction="metadata_fallback_pending_ocr" if ocr_recommended else "metadata_fallback_no_ocr",
+        extra_meta={
+            "ocr_recommended": True if ocr_recommended else None,
+            "ocr_status": "pending" if ocr_recommended else "not_needed",
+            "ocr_task_id": None,
+            "ocr_applied": None,
+        },
+    )
+
+    if ocr_recommended:
+        result["ocr_queued"] = True
+        result["ocr_task_id"] = _queue_ocr_task(db, source)
+    else:
+        result["ocr_queued"] = False
+    return result
+
+
+
+def _process_source_ocr(db: Session, source: SourceDocument):
+    try:
+        data, payload_meta = _load_source_bytes(source)
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)}
+
+    source.meta_json = {**(source.meta_json or {}), "ocr_status": "running"}
+    db.commit()
+
+    parse_name = (
+        payload_meta.get("object_name")
+        or payload_meta.get("local_path")
+        or (source.meta_json or {}).get("file_name")
+        or source.file_uri
+    )
+    parsed = parse_document_bytes(
+        data,
+        filename=str(parse_name or ""),
+        allow_ocr=True,
+        force_ocr=True,
+    )
+    pages = parsed.get("pages", [])
+    parse_meta = parsed.get("meta") or {}
+    extraction_mode = parse_meta.get("text_extraction")
+    ocr_applied = bool(parse_meta.get("ocr_applied"))
+    result = _persist_parsed_source(
+        db,
+        source,
+        pages,
+        payload_meta,
+        extraction_mode=extraction_mode,
+        fallback_extraction="metadata_fallback_after_ocr",
+        extra_meta={
+            "ocr_recommended": None,
+            "ocr_status": "done" if ocr_applied else "attempted_no_text",
+            "ocr_task_id": None,
+            "ocr_attempted": True,
+            "ocr_applied": True if ocr_applied else None,
+        },
+    )
+    result["ocr_applied"] = ocr_applied
+    return result
 
 def _resolve_case_no(jurisdiction_case: JurisdictionCase) -> str | None:
     if (jurisdiction_case.jurisdiction or "").upper() == "EU":
@@ -390,25 +548,26 @@ def _match_comparison_category(*, document_type_raw: str, file_name: str) -> str
     text = re.sub(r"[^a-z0-9]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
 
+    if "reply to communication from the examining division" in text:
+        return "reply_to_communication_from_examining_division"
+    if "amended claims with annotations" in text:
+        return "amended_claims_with_annotations"
+
     for category, keywords in _COMPARISON_CATEGORY_RULES:
         if category == "claims":
             if not re.search(r"\bclaims\b", text):
                 continue
-        elif category == "description":
-            if not re.search(r"\bdescription\b", text):
-                continue
         elif not any(keyword in text for keyword in keywords):
             continue
 
-        if category == "claims" and any(hint in text for hint in _CLAIMS_TRANSLATION_HINTS):
-            continue
-        if category == "description" and any(hint in text for hint in _DESCRIPTION_TRANSLATION_HINTS):
+        if "claims" in category and any(hint in text for hint in _CLAIMS_TRANSLATION_HINTS):
             continue
         return category
     return None
 
 
 def _export_comparison_candidates(records: list[dict[str, str]]) -> dict[str, Any]:
+    comparison_dirs: set[Path] = set()
     selected: list[dict[str, str]] = []
     seen_sources: set[Path] = set()
 
@@ -431,7 +590,11 @@ def _export_comparison_candidates(records: list[dict[str, str]]) -> dict[str, An
             continue
 
         files_dir = _resolve_files_dir(source_path)
-        target_dir = files_dir / "comparison_candidates" / category
+        comparison_dir = files_dir / "comparison_candidates"
+        if comparison_dir not in comparison_dirs:
+            _reset_comparison_dir(comparison_dir)
+            comparison_dirs.add(comparison_dir)
+        target_dir = comparison_dir / category
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = _unique_target_path(target_dir, source_path.name)
 
@@ -468,6 +631,12 @@ def _export_comparison_candidates(records: list[dict[str, str]]) -> dict[str, An
     return payload
 
 
+def _reset_comparison_dir(comparison_dir: Path) -> None:
+    if comparison_dir.exists():
+        shutil.rmtree(comparison_dir)
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+
+
 def _create_source_from_fetched(
     db: Session,
     jurisdiction_case: JurisdictionCase,
@@ -493,9 +662,14 @@ def _create_source_from_fetched(
         doc_meta,
     )
     local_path = _persist_local_copy(local_output_path, data)
+    normalized_doc_type = classify_doc_type(
+        raw_label=str(doc_meta.get("document_type_raw") or doc_meta.get("doc_type") or ""),
+        file_name=filename,
+        fallback=doc_meta.get("doc_type") or infer_doc_type(filename),
+    )
     source = SourceDocument(
         jurisdiction_case_id=jurisdiction_case.id,
-        doc_type=doc_meta.get("doc_type") or infer_doc_type(filename),
+        doc_type=normalized_doc_type,
         language=doc_meta.get("language"),
         source_type=provider_name,
         file_uri=storage_client.object_uri(object_name),
@@ -506,7 +680,7 @@ def _create_source_from_fetched(
             "local_path": local_path or fetched.get("local_path") or doc_meta.get("local_path"),
         },
         version=doc_meta.get("version"),
-        included=True,
+        included=should_auto_include(normalized_doc_type),
     )
     db.add(source)
     db.flush()
@@ -572,7 +746,7 @@ def _ingest_jurisdiction_case(
                 {
                     "stage": "listing_documents",
                     "status": "running",
-                    "message": f"{jurisdiction_case.jurisdiction}: 正在列出 {provider_name} 文档",
+                    "message": f"{jurisdiction_case.jurisdiction}: 正在列出 {provider_name} 文档。",
                     "provider": provider_name,
                     "documents_discovered": 0,
                     "documents_fetched": len(created_source_ids),
@@ -588,7 +762,7 @@ def _ingest_jurisdiction_case(
                 {
                     "stage": "downloading_documents",
                     "status": "running",
-                    "message": f"{jurisdiction_case.jurisdiction}: 正在下载 {provider_name} 文档",
+                    "message": f"{jurisdiction_case.jurisdiction}: 正在下载 {provider_name} 文档。",
                     "provider": provider_name,
                     "documents_discovered": len(docs),
                     "documents_fetched": len(created_source_ids),
@@ -604,7 +778,7 @@ def _ingest_jurisdiction_case(
                         {
                             "stage": "downloading_documents",
                             "status": "running",
-                            "message": f"{jurisdiction_case.jurisdiction}: 已处理 {idx}/{len(docs)} 个文档",
+                            "message": f"{jurisdiction_case.jurisdiction}: 已处理 {idx}/{len(docs)} 个文档。",
                             "provider": provider_name,
                             "documents_discovered": len(docs),
                             "documents_fetched": len(created_source_ids),
@@ -633,7 +807,7 @@ def _ingest_jurisdiction_case(
                     {
                         "stage": "downloading_documents",
                         "status": "running",
-                        "message": f"{jurisdiction_case.jurisdiction}: 已下载 {idx}/{len(docs)} 个文档",
+                        "message": f"{jurisdiction_case.jurisdiction}: 已下载 {idx}/{len(docs)} 个文档。",
                         "provider": provider_name,
                         "documents_discovered": len(docs),
                         "documents_fetched": len(created_source_ids),
@@ -685,6 +859,29 @@ def process_source(source_id: str):
         db.close()
 
 
+@celery_app.task(name="app.tasks.ingest.ocr_source")
+def ocr_source(source_id: str):
+    db = SessionLocal()
+    try:
+        sid = uuid.UUID(source_id)
+        source = db.query(SourceDocument).filter(SourceDocument.id == sid).first()
+        if not source:
+            return {"status": "error", "reason": "source not found"}
+        try:
+            return _process_source_ocr(db, source)
+        except Exception as exc:
+            source.meta_json = {
+                **(source.meta_json or {}),
+                "ocr_status": "error",
+                "ocr_task_id": None,
+                "ocr_error": str(exc),
+            }
+            db.commit()
+            return {"status": "error", "reason": str(exc)}
+    finally:
+        db.close()
+
+
 @celery_app.task(name="app.tasks.ingest.ingest_case", bind=True)
 def ingest_case(self, case_id: str, options: dict[str, Any] | None = None):
     ingest_options = {**DEFAULT_INGEST_OPTIONS, **(options or {})}
@@ -695,7 +892,7 @@ def ingest_case(self, case_id: str, options: dict[str, Any] | None = None):
             case_id=case_id,
             stage="initializing",
             status="running",
-            message="正在初始化采集任务",
+            message="正在初始化采集任务。",
             current=0,
             total=1,
             percent=0,
@@ -797,3 +994,17 @@ def ingest_case(self, case_id: str, options: dict[str, Any] | None = None):
         }
     finally:
         db.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+

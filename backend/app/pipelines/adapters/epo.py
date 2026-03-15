@@ -15,7 +15,7 @@ import httpx
 
 from app.core.config import settings
 from app.pipelines.adapters.base import IngestAdapter
-from app.services.document_classifier import infer_doc_type
+from app.services.document_classifier import classify_doc_type, infer_doc_type
 
 OPS_BASE_URL = "https://ops.epo.org/3.2"
 OPS_REST_BASE_URL = f"{OPS_BASE_URL}/rest-services"
@@ -25,16 +25,24 @@ _PUB_REF_RE = re.compile(r"^EP(\d+)([A-Z]\d?)?$", re.IGNORECASE)
 _PUB_KIND_ALLOWED = set("ABCUTWY")
 _COMPARISON_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
     (
+        "communication_from_examining_division",
+        ("communication from the examining division",),
+    ),
+    (
+        "annex_to_the_communication",
+        ("annex to the communication",),
+    ),
+    (
+        "reply_to_communication_from_examining_division",
+        ("reply to communication from the examining division",),
+    ),
+    (
+        "amended_claims",
+        ("amended claims",),
+    ),
+    (
         "amended_claims_with_annotations",
         ("amended claims with annotations",),
-    ),
-    (
-        "amended_description_with_annotations",
-        ("amended description with annotations",),
-    ),
-    (
-        "text_intended_for_grant_clean_copy",
-        ("text intended for grant clean copy",),
     ),
     (
         "european_search_opinion",
@@ -44,10 +52,6 @@ _COMPARISON_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
         "claims",
         ("claims",),
     ),
-    (
-        "description",
-        ("description",),
-    ),
 ]
 _CLAIMS_TRANSLATION_HINTS = (
     "translation of claims",
@@ -56,14 +60,11 @@ _CLAIMS_TRANSLATION_HINTS = (
     "filing of the translations of the claims",
     "claims translation",
     "translated claims",
-)
-_DESCRIPTION_TRANSLATION_HINTS = (
-    "translation of description",
-    "translation of the description",
-    "translations of the description",
-    "filing of the translations of the description",
-    "description translation",
-    "translated description",
+    "translation of amended claims",
+    "translation of the amended claims",
+    "translations of the amended claims",
+    "amended claims translation",
+    "translated amended claims",
 )
 LOGGER = logging.getLogger(__name__)
 
@@ -446,6 +447,7 @@ class EPOAdapter(IngestAdapter):
         return documents
 
     def _export_comparison_candidates(self, documents: List[Dict]) -> None:
+        comparison_dirs: set[Path] = set()
         selected: list[dict] = []
         seen_sources: set[Path] = set()
 
@@ -467,7 +469,11 @@ class EPOAdapter(IngestAdapter):
                 continue
 
             files_dir = self._resolve_files_dir(source_path)
-            target_dir = files_dir / "comparison_candidates" / category
+            comparison_dir = files_dir / "comparison_candidates"
+            if comparison_dir not in comparison_dirs:
+                self._reset_comparison_dir(comparison_dir)
+                comparison_dirs.add(comparison_dir)
+            target_dir = comparison_dir / category
             target_dir.mkdir(parents=True, exist_ok=True)
             target_path = self._unique_target_path(target_dir, source_path.name)
 
@@ -512,6 +518,12 @@ class EPOAdapter(IngestAdapter):
         return source_path.parent
 
     @staticmethod
+    def _reset_comparison_dir(comparison_dir: Path) -> None:
+        if comparison_dir.exists():
+            shutil.rmtree(comparison_dir)
+        comparison_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
     def _unique_target_path(target_dir: Path, file_name: str) -> Path:
         stem = Path(file_name).stem
         suffix = Path(file_name).suffix
@@ -524,25 +536,24 @@ class EPOAdapter(IngestAdapter):
             if not candidate.exists():
                 return candidate
             idx += 1
-
     @staticmethod
     def _match_comparison_category(*, document_type_raw: str, file_name: str) -> str | None:
         text = f"{document_type_raw} {file_name}".lower()
         text = re.sub(r"[^a-z0-9]+", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
 
+        if "reply to communication from the examining division" in text:
+            return "reply_to_communication_from_examining_division"
+        if "amended claims with annotations" in text:
+            return "amended_claims_with_annotations"
+
         for category, keywords in _COMPARISON_CATEGORY_RULES:
             if category == "claims":
                 if not re.search(r"\bclaims\b", text):
                     continue
-            elif category == "description":
-                if not re.search(r"\bdescription\b", text):
-                    continue
             elif not any(keyword in text for keyword in keywords):
                 continue
-            if category == "claims" and any(hint in text for hint in _CLAIMS_TRANSLATION_HINTS):
-                continue
-            if category == "description" and any(hint in text for hint in _DESCRIPTION_TRANSLATION_HINTS):
+            if "claims" in category and any(hint in text for hint in _CLAIMS_TRANSLATION_HINTS):
                 continue
             return category
         return None
@@ -561,18 +572,7 @@ class EPOAdapter(IngestAdapter):
 
     @staticmethod
     def _map_register_doc_type(raw_label: str | None, file_name: str) -> str:
-        text = f"{raw_label or ''} {file_name}".lower()
-        if "search report" in text or re.search(r"\bisr\b", text):
-            return "search_report"
-        if "written opinion" in text or re.search(r"\biprp\b", text):
-            return "search_opinion"
-        if "communication" in text or "notification" in text or "examination" in text:
-            return "office_action"
-        if "response" in text or "reply" in text or "observations" in text:
-            return "response"
-        if "amend" in text or "claims" in text or "description" in text or "drawings" in text:
-            return "amendment"
-        return infer_doc_type(file_name, fallback="other")
+        return classify_doc_type(raw_label=raw_label, file_name=file_name, fallback=infer_doc_type(file_name, fallback="other"))
 
     def _collect_publication_refs(self, case_no: str) -> List[str]:
         normalized = re.sub(r"\s+", "", case_no).upper()
@@ -693,3 +693,10 @@ class EPOAdapter(IngestAdapter):
             f"EP/{digits}/{kind}/fullimage",
             f"EP/{digits}/{kind}/firstpage",
         ]
+
+
+
+
+
+
+

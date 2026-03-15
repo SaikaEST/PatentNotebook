@@ -1,4 +1,4 @@
-﻿services:
+services:
   postgres:
     image: ankane/pgvector:latest
     environment:
@@ -60,6 +60,46 @@
       - ./ep_ingest:/ep_ingest
       - ./data:/data
     command: ["celery", "-A", "app.tasks.celery_app", "worker", "-Q", "default,ingest,nlp,export", "-P", "solo", "--loglevel=info"]
+
+  processor:
+    build:
+      context: ./backend
+    env_file: .env
+    environment:
+      PYTHONPATH: /app:/ep_ingest/src
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      NUMEXPR_NUM_THREADS: "2"
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    volumes:
+      - ./backend:/app
+      - ./ep_ingest:/ep_ingest
+      - ./data:/data
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "-Q", "process", "-P", "solo", "--concurrency=1", "--loglevel=info"]
+
+  ocr:
+    build:
+      context: ./backend
+    env_file: .env
+    environment:
+      PYTHONPATH: /app:/ep_ingest/src
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    volumes:
+      - ./backend:/app
+      - ./ep_ingest:/ep_ingest
+      - ./data:/data
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "-Q", "ocr", "-P", "solo", "--concurrency=1", "--loglevel=info"]
 
   frontend:
     build:

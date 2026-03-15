@@ -9,6 +9,7 @@ from pathlib import Path
 from ep_ingest.http_client import HttpResult
 from ep_ingest.metrics import Metrics
 from ep_ingest.models import DocumentRecord, IdentifierMapping, PatentDataset
+from ep_ingest.processing.comparison_candidates import export_comparison_candidates
 from ep_ingest.scraper.register import RegisterScraper, ZipArchivePayload
 from ep_ingest.service import EpIngestionService
 from ep_ingest.storage import build_output_paths
@@ -170,3 +171,36 @@ def test_fetch_exports_comparison_candidates(monkeypatch, tmp_path: Path) -> Non
     assert payload["categories"] == ["claims"]
     copied = paths.files_dir / "comparison_candidates" / "claims" / claims_file.name
     assert copied.exists()
+
+
+def test_export_comparison_candidates_is_idempotent(tmp_path: Path) -> None:
+    files_dir = tmp_path / "EP" / "files"
+    zip_dir = files_dir / "zip_archive"
+    zip_dir.mkdir(parents=True, exist_ok=True)
+    claims_file = zip_dir / "claims.pdf"
+    claims_file.write_bytes(b"%PDF-claims")
+
+    documents = [
+        DocumentRecord(
+            register_document_id="DOC001",
+            date="2017-01-01",
+            document_type_raw="Claims",
+            procedure="Search / examination",
+            pages=4,
+            file_url="https://register.epo.org/application?documentId=DOC001",
+            content_type="pdf",
+            local_path=str(claims_file),
+        )
+    ]
+
+    first = export_comparison_candidates(documents, files_dir)
+    second = export_comparison_candidates(documents, files_dir)
+
+    comparison_dir = files_dir / "comparison_candidates" / "claims"
+    copied_files = sorted(path.name for path in comparison_dir.glob("*.pdf"))
+    manifest = json.loads((files_dir / "comparison_candidates" / "manifest.json").read_text(encoding="utf-8"))
+
+    assert first["selected_count"] == 1
+    assert second["selected_count"] == 1
+    assert copied_files == ["claims.pdf"]
+    assert Path(manifest["files"][0]["target_path"]).name == "claims.pdf"

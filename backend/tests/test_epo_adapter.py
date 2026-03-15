@@ -1,5 +1,6 @@
-import json
+﻿import json
 import sys
+from pathlib import Path
 import types
 from types import SimpleNamespace
 
@@ -35,31 +36,24 @@ def test_heuristic_image_paths_from_publication_ref():
 def test_match_comparison_category_keywords():
     assert (
         EPOAdapter._match_comparison_category(
-            document_type_raw="Amended claims with annotations",
+            document_type_raw="Communication from the Examining Division",
             file_name="x.pdf",
         )
-        == "amended_claims_with_annotations"
+        == "communication_from_examining_division"
     )
     assert (
         EPOAdapter._match_comparison_category(
-            document_type_raw="Amended description with annotations",
+            document_type_raw="Annex to the communication",
             file_name="x.pdf",
         )
-        == "amended_description_with_annotations"
+        == "annex_to_the_communication"
     )
     assert (
         EPOAdapter._match_comparison_category(
-            document_type_raw="European search opinion",
+            document_type_raw="Reply to communication from the Examining Division",
             file_name="x.pdf",
         )
-        == "european_search_opinion"
-    )
-    assert (
-        EPOAdapter._match_comparison_category(
-            document_type_raw="Text intended for grant (clean copy)",
-            file_name="x.pdf",
-        )
-        == "text_intended_for_grant_clean_copy"
+        == "reply_to_communication_from_examining_division"
     )
     assert (
         EPOAdapter._match_comparison_category(
@@ -70,10 +64,24 @@ def test_match_comparison_category_keywords():
     )
     assert (
         EPOAdapter._match_comparison_category(
-            document_type_raw="Description",
+            document_type_raw="Amended claims",
             file_name="x.pdf",
         )
-        == "description"
+        == "amended_claims"
+    )
+    assert (
+        EPOAdapter._match_comparison_category(
+            document_type_raw="Amended claims with annotations",
+            file_name="x.pdf",
+        )
+        == "amended_claims_with_annotations"
+    )
+    assert (
+        EPOAdapter._match_comparison_category(
+            document_type_raw="European search opinion",
+            file_name="x.pdf",
+        )
+        == "european_search_opinion"
     )
 
 
@@ -87,7 +95,7 @@ def test_match_comparison_category_ignores_translations():
     )
     assert (
         EPOAdapter._match_comparison_category(
-            document_type_raw="French translation of the description",
+            document_type_raw="German translation of amended claims",
             file_name="x.pdf",
         )
         is None
@@ -289,3 +297,36 @@ def test_fetch_document_reads_local_html_payload(tmp_path):
     assert fetched["file_name"] == "register_notice.html"
     assert fetched["content_type"] == "text/html"
     assert b"hello" in fetched["bytes"]
+
+
+def test_export_comparison_candidates_replaces_previous_filtered_output(tmp_path):
+    files_dir = tmp_path / "EP" / "files" / "zip_archive"
+    files_dir.mkdir(parents=True, exist_ok=True)
+
+    claims_pdf = files_dir / "claims.pdf"
+    claims_pdf.write_bytes(b"%PDF-claims")
+
+    comparison_dir = files_dir.parent / "comparison_candidates" / "claims"
+    comparison_dir.mkdir(parents=True, exist_ok=True)
+    stale_copy = comparison_dir / "claims_2.pdf"
+    stale_copy.write_bytes(b"%PDF-stale")
+
+    adapter = EPOAdapter()
+    docs = [
+        {
+            "local_path": str(claims_pdf),
+            "file_name": claims_pdf.name,
+            "document_type_raw": "Claims",
+        }
+    ]
+
+    adapter._export_comparison_candidates(docs)
+
+    copied_files = sorted(path.name for path in comparison_dir.glob("*.pdf"))
+    payload = json.loads((files_dir.parent / "comparison_candidates" / "manifest.json").read_text(encoding="utf-8"))
+
+    assert copied_files == ["claims.pdf"]
+    assert not stale_copy.exists()
+    assert Path(payload["files"][0]["target_path"]).name == "claims.pdf"
+
+

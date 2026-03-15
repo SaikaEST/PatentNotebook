@@ -1,4 +1,4 @@
-﻿import re
+import re
 from functools import lru_cache
 from io import BytesIO
 from typing import Dict, Iterable, List
@@ -15,10 +15,16 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-def parse_document_bytes(data: bytes, filename: str | None = None) -> Dict:
+def parse_document_bytes(
+    data: bytes,
+    filename: str | None = None,
+    *,
+    allow_ocr: bool = True,
+    force_ocr: bool = False,
+) -> Dict:
     name = (filename or "").lower()
     if name.endswith(".pdf"):
-        return _parse_pdf(data)
+        return _parse_pdf(data, allow_ocr=allow_ocr, force_ocr=force_ocr)
     if name.endswith(".html") or name.endswith(".htm"):
         return _parse_html(data)
     if name.endswith(".xml"):
@@ -26,15 +32,23 @@ def parse_document_bytes(data: bytes, filename: str | None = None) -> Dict:
     return _parse_text(data)
 
 
-def _parse_pdf(data: bytes) -> Dict:
+def _parse_pdf(data: bytes, *, allow_ocr: bool, force_ocr: bool) -> Dict:
     reader = PdfReader(BytesIO(data))
     pages = []
     for idx, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
         pages.append({"page_no": idx, "text": _clean_text(text)})
 
+    total_chars = sum(len((page.get("text") or "").strip()) for page in pages)
+    ocr_recommended = force_ocr or _should_apply_ocr(pages)
     extraction_mode = "pdf_text"
-    if _should_apply_ocr(pages):
+    meta: Dict[str, object] = {}
+
+    if ocr_recommended:
+        meta["ocr_recommended"] = True
+
+    if ocr_recommended and allow_ocr:
+        meta["ocr_attempted"] = True
         ocr_pages = _ocr_pdf_pages(data)
         if ocr_pages:
             merged_pages = []
@@ -43,16 +57,18 @@ def _parse_pdf(data: bytes) -> Dict:
                 page_no = page.get("page_no")
                 raw_text = page.get("text", "")
                 ocr_text = ocr_pages.get(page_no, "")
-                if len(raw_text) < settings.pdf_ocr_page_min_chars and ocr_text:
+                if (force_ocr or len(raw_text) < settings.pdf_ocr_page_min_chars) and ocr_text:
                     replaced_pages += 1
                     merged_pages.append({"page_no": page_no, "text": _clean_text(ocr_text)})
                 else:
                     merged_pages.append(page)
             pages = merged_pages
             if replaced_pages > 0:
-                extraction_mode = "pdf_text_plus_ocr"
+                meta["ocr_applied"] = True
+                extraction_mode = "pdf_ocr" if total_chars == 0 else "pdf_text_plus_ocr"
 
-    return {"pages": pages, "meta": {"text_extraction": extraction_mode}}
+    meta["text_extraction"] = extraction_mode
+    return {"pages": pages, "meta": meta}
 
 
 def _parse_html(data: bytes) -> Dict:

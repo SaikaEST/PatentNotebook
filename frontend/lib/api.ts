@@ -1,12 +1,47 @@
-﻿const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export type SourceDocument = {
   id: string;
   doc_type: string;
+  file_name?: string | null;
   language?: string | null;
   source_type?: string | null;
   included: boolean;
   file_uri?: string | null;
+};
+
+export type SourceCitation = {
+  source_id: string;
+  chunk_id: string;
+  page?: number | null;
+  quote: string;
+  source_name?: string | null;
+  viewer_url?: string | null;
+};
+
+export type ChatResponse = {
+  answer: string;
+  citations: SourceCitation[];
+  missing?: boolean;
+  missing_reason?: string | null;
+};
+
+export type SourceViewerChunk = {
+  id: string;
+  chunk_index: number;
+  page_no?: number | null;
+  text: string;
+};
+
+export type SourceViewerResponse = {
+  source_id: string;
+  file_name?: string | null;
+  doc_type: string;
+  language?: string | null;
+  source_type?: string | null;
+  file_uri?: string | null;
+  text_uri?: string | null;
+  chunks: SourceViewerChunk[];
 };
 
 export type PatentCasePayload = {
@@ -82,6 +117,24 @@ export type AuthResponse = {
   token_type: string;
 };
 
+export type QueueSourcesTaskPayload = {
+  jurisdictionCaseId?: string;
+  includedOnly?: boolean;
+  sourceIds?: string[];
+};
+
+export type QueueSourcesTaskResponse = {
+  queued_count: number;
+  queued_source_ids: string[];
+  task_ids: string[];
+};
+
+export type QueueSourceTaskResponse = {
+  source_id: string;
+  task_id: string;
+  queued: boolean;
+};
+
 export async function register(email: string, password: string) {
   const res = await fetch(`${API_BASE}/auth/register`, {
     method: "POST",
@@ -133,7 +186,7 @@ export async function startIngest(
     },
     body: JSON.stringify(payload),
   });
-  await ensureResponseOk(res, "启动采集失败");
+  await ensureResponseOk(res, "启动抓取失败");
   return (await res.json()) as IngestResponse;
 }
 
@@ -142,7 +195,7 @@ export async function getIngestTaskStatus(taskId: string, token: string) {
     method: "GET",
     headers: buildAuthHeader(token),
   });
-  await ensureResponseOk(res, "加载采集进度失败");
+  await ensureResponseOk(res, "加载抓取进度失败");
   return (await res.json()) as IngestTaskStatusResponse;
 }
 
@@ -156,7 +209,7 @@ export async function chat(payload: any, token: string) {
     body: JSON.stringify(payload),
   });
   await ensureResponseOk(res, "问答请求失败");
-  return res.json();
+  return (await res.json()) as ChatResponse;
 }
 
 function buildAuthHeader(token: string): HeadersInit {
@@ -177,6 +230,14 @@ async function ensureResponseOk(res: Response, fallbackMessage: string) {
   throw new Error(extractErrorMessage(body, fallbackMessage));
 }
 
+function toSourceTaskRequest(payload: QueueSourcesTaskPayload) {
+  return {
+    jurisdiction_case_id: payload.jurisdictionCaseId,
+    included_only: payload.includedOnly ?? true,
+    source_ids: payload.sourceIds ?? [],
+  };
+}
+
 export async function listSources(token: string, jurisdictionCaseId?: string) {
   const query = jurisdictionCaseId
     ? `?jurisdiction_case_id=${encodeURIComponent(jurisdictionCaseId)}`
@@ -187,6 +248,15 @@ export async function listSources(token: string, jurisdictionCaseId?: string) {
   });
   await ensureResponseOk(res, "加载来源文档失败");
   return (await res.json()) as SourceDocument[];
+}
+
+export async function getSourceViewer(token: string, sourceId: string) {
+  const res = await fetch(`${API_BASE}/sources/${encodeURIComponent(sourceId)}/viewer`, {
+    method: "GET",
+    headers: buildAuthHeader(token),
+  });
+  await ensureResponseOk(res, "加载文档内容失败");
+  return (await res.json()) as SourceViewerResponse;
 }
 
 type UploadSourcePayload = {
@@ -224,6 +294,50 @@ export async function updateSourceIncluded(token: string, sourceId: string, incl
   return (await res.json()) as { id: string; included: boolean };
 }
 
+export async function queueSourcesProcess(token: string, payload: QueueSourcesTaskPayload) {
+  const res = await fetch(`${API_BASE}/sources/process`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildAuthHeader(token),
+    },
+    body: JSON.stringify(toSourceTaskRequest(payload)),
+  });
+  await ensureResponseOk(res, "提交解析任务失败");
+  return (await res.json()) as QueueSourcesTaskResponse;
+}
+
+export async function queueSourcesOcr(token: string, payload: QueueSourcesTaskPayload) {
+  const res = await fetch(`${API_BASE}/sources/ocr`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildAuthHeader(token),
+    },
+    body: JSON.stringify(toSourceTaskRequest(payload)),
+  });
+  await ensureResponseOk(res, "提交 OCR 任务失败");
+  return (await res.json()) as QueueSourcesTaskResponse;
+}
+
+export async function queueSourceProcess(token: string, sourceId: string) {
+  const res = await fetch(`${API_BASE}/sources/${encodeURIComponent(sourceId)}/process`, {
+    method: "POST",
+    headers: buildAuthHeader(token),
+  });
+  await ensureResponseOk(res, "提交文档解析任务失败");
+  return (await res.json()) as QueueSourceTaskResponse;
+}
+
+export async function queueSourceOcr(token: string, sourceId: string) {
+  const res = await fetch(`${API_BASE}/sources/${encodeURIComponent(sourceId)}/ocr`, {
+    method: "POST",
+    headers: buildAuthHeader(token),
+  });
+  await ensureResponseOk(res, "提交文档 OCR 任务失败");
+  return (await res.json()) as QueueSourceTaskResponse;
+}
+
 type CreateArtifactPayload = {
   case_id: string;
   artifact_type: string;
@@ -253,11 +367,7 @@ export async function getArtifactStatus(artifactId: string, token: string) {
   return (await res.json()) as ArtifactStatusResponse;
 }
 
-export async function getArtifactDownloadUrl(
-  artifactId: string,
-  token: string,
-  expiresIn = 3600
-) {
+export async function getArtifactDownloadUrl(artifactId: string, token: string, expiresIn = 3600) {
   const res = await fetch(
     `${API_BASE}/studio/artifacts/${artifactId}/download-url?expires_in=${expiresIn}`,
     {

@@ -1,4 +1,4 @@
-﻿from typing import Optional
+from typing import Optional
 from pydantic import BaseModel
 
 
@@ -7,6 +7,8 @@ class Citation(BaseModel):
     chunk_id: str
     page: Optional[int] = None
     quote: str
+    source_name: Optional[str] = None
+    viewer_url: Optional[str] = None
 
 
 class MissingInfo(BaseModel):
